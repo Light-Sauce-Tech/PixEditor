@@ -3,6 +3,7 @@ use egui::Color32;
 
 const CANVAS_SIZE: usize = 32;
 const PIXEL_SIZE: f32 = 15.0;
+const MAX_BRUSH_RADIUS: usize = 5;
 
 #[derive(Default)]
 struct PixelArtEditor {
@@ -10,6 +11,8 @@ struct PixelArtEditor {
     current_tool: Tool,
     layers: Vec<Layer>,
     active_layer: usize,
+    brush_radius: usize,
+    show_brush_settings: bool,
 }
 
 #[derive(Default, PartialEq)]
@@ -33,6 +36,8 @@ impl PixelArtEditor {
             current_tool: Tool::Pencil,
             layers: vec![Layer::default()],
             active_layer: 0,
+            brush_radius: 1,
+            show_brush_settings: false,
         }
     }
 
@@ -43,13 +48,28 @@ impl PixelArtEditor {
 
         match self.current_tool {
             Tool::Pencil => {
-                self.layers[self.active_layer].pixels[pos.0][pos.1] = self.current_color;
+                self.draw_circle(pos.0, pos.1, self.brush_radius, self.current_color);
             }
             Tool::Eraser => {
-                self.layers[self.active_layer].pixels[pos.0][pos.1] = Color32::TRANSPARENT;
+                self.draw_circle(pos.0, pos.1, self.brush_radius, Color32::TRANSPARENT);
             }
             Tool::Fill => {
                 self.flood_fill(pos.0, pos.1, self.current_color);
+            }
+        }
+    }
+
+    fn draw_circle(&mut self, x: usize, y: usize, radius: usize, color: Color32) {
+        let r_squared = radius * radius;
+        for dy in -(radius as i32)..=radius as i32 {
+            for dx in -(radius as i32)..=radius as i32 {
+                if dx * dx + dy * dy <= r_squared as i32 {
+                    let nx = x as i32 + dx;
+                    let ny = y as i32 + dy;
+                    if nx >= 0 && ny >= 0 && nx < CANVAS_SIZE as i32 && ny < CANVAS_SIZE as i32 {
+                        self.layers[self.active_layer].pixels[nx as usize][ny as usize] = color;
+                    }
+                }
             }
         }
     }
@@ -86,10 +106,30 @@ impl PixelArtEditor {
 
 impl eframe::App for PixelArtEditor {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Контекстное меню для настроек кисти
+        if self.show_brush_settings {
+            egui::Window::new("Настройки кисти")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label(format!("Радиус: {}", self.brush_radius));
+                    ui.add(egui::Slider::new(&mut self.brush_radius, 1..=MAX_BRUSH_RADIUS));
+                    
+                    if ui.button("Закрыть").clicked() {
+                        self.show_brush_settings = false;
+                    }
+                });
+        }
+
         // Панель инструментов сверху
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.current_tool, Tool::Pencil, "✏️ Карандаш");
+                // Кнопка карандаша с контекстным меню
+                let pencil_btn = ui.selectable_value(&mut self.current_tool, Tool::Pencil, "✏️ Карандаш");
+                if pencil_btn.secondary_clicked() {
+                    self.show_brush_settings = true;
+                }
+                
                 ui.selectable_value(&mut self.current_tool, Tool::Eraser, "🧽 Ластик");
                 ui.selectable_value(&mut self.current_tool, Tool::Fill, "🎨 Заливка");
                 
