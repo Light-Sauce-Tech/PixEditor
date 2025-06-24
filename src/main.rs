@@ -1,5 +1,8 @@
 use eframe::egui;
 use egui::Color32;
+use std::fs::File;
+use std::io::BufWriter;
+use std::path::PathBuf;
 
 const CANVAS_SIZE: usize = 32;
 const PIXEL_SIZE: f32 = 15.0;
@@ -13,6 +16,7 @@ struct PixelArtEditor {
     active_layer: usize,
     brush_radius: usize,
     show_brush_settings: bool,
+    save_path: Option<PathBuf>,
 }
 
 #[derive(Default, PartialEq)]
@@ -38,6 +42,7 @@ impl PixelArtEditor {
             active_layer: 0,
             brush_radius: 1,
             show_brush_settings: false,
+            save_path: None,
         }
     }
 
@@ -47,21 +52,20 @@ impl PixelArtEditor {
         }
 
         match self.current_tool {
-            Tool::Pencil => self.draw_circle(pos.0, pos.1, self.current_color),
-            Tool::Eraser => self.draw_circle(pos.0, pos.1, Color32::TRANSPARENT),
+            Tool::Pencil => self.draw_square(pos.0, pos.1, self.current_color),
+            Tool::Eraser => self.draw_square(pos.0, pos.1, Color32::TRANSPARENT),
             Tool::Fill => self.flood_fill(pos.0, pos.1, self.current_color),
         }
     }
 
-    fn draw_circle(&mut self, x: usize, y: usize, color: Color32) {
-        for dy in -(self.brush_radius as i32)..=self.brush_radius as i32 {
-            for dx in -(self.brush_radius as i32)..=self.brush_radius as i32 {
-                if dx * dx + dy * dy <= (self.brush_radius * self.brush_radius) as i32 {
-                    let nx = x as i32 + dx;
-                    let ny = y as i32 + dy;
-                    if nx >= 0 && ny >= 0 && nx < CANVAS_SIZE as i32 && ny < CANVAS_SIZE as i32 {
-                        self.layers[self.active_layer].pixels[nx as usize][ny as usize] = color;
-                    }
+    fn draw_square(&mut self, x: usize, y: usize, color: Color32) {
+        let radius = self.brush_radius;
+        for dy in 0..radius {
+            for dx in 0..radius {
+                let nx = x.saturating_add(dx);
+                let ny = y.saturating_add(dy);
+                if nx < CANVAS_SIZE && ny < CANVAS_SIZE {
+                    self.layers[self.active_layer].pixels[nx][ny] = color;
                 }
             }
         }
@@ -87,6 +91,69 @@ impl PixelArtEditor {
             if y < CANVAS_SIZE - 1 { stack.push((x, y + 1)); }
         }
     }
+
+    fn save_to_png(&self, filename: &PathBuf) -> Result<(), png::EncodingError> {
+        let file = File::create(filename)?;
+        let w = BufWriter::new(file);
+
+        let mut encoder = png::Encoder::new(w, CANVAS_SIZE as u32, CANVAS_SIZE as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+
+        let mut writer = encoder.write_header()?;
+
+        let mut data = vec![0; CANVAS_SIZE * CANVAS_SIZE * 4];
+        
+        for x in 0..CANVAS_SIZE {
+            for y in 0..CANVAS_SIZE {
+                let mut color = Color32::TRANSPARENT;
+                for layer in &self.layers {
+                    if layer.visible && layer.pixels[x][y] != Color32::TRANSPARENT {
+                        color = layer.pixels[x][y];
+                    }
+                }
+                
+                let idx = (y * CANVAS_SIZE + x) * 4;
+                data[idx] = color.r();
+                data[idx + 1] = color.g();
+                data[idx + 2] = color.b();
+                data[idx + 3] = color.a();
+            }
+        }
+
+        writer.write_image_data(&data)?;
+        Ok(())
+    }
+
+    fn show_save_dialog(&mut self, ctx: &egui::Context) {
+        egui::Window::new("Сохранить изображение")
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                ui.label("Выберите место для сохранения:");
+                
+                if ui.button("Выбрать папку").clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .set_file_name("pixel_art.png")
+                        .save_file()
+                    {
+                        self.save_path = Some(path);
+                    }
+                }
+                
+                if let Some(path) = &self.save_path {
+                    ui.label(format!("Будет сохранено в: {}", path.display()));
+                    
+                    if ui.button("Сохранить").clicked() {
+                        if let Err(e) = self.save_to_png(path) {
+                            eprintln!("Ошибка сохранения: {}", e);
+                        } else {
+                            println!("Изображение сохранено как {}", path.display());
+                        }
+                    }
+                }
+            });
+    }
 }
 
 impl eframe::App for PixelArtEditor {
@@ -97,7 +164,7 @@ impl eframe::App for PixelArtEditor {
                 .collapsible(false)
                 .resizable(false)
                 .show(ctx, |ui| {
-                    ui.label(format!("Радиус: {}", self.brush_radius));
+                    ui.label(format!("Размер: {}x{}", self.brush_radius, self.brush_radius));
                     ui.add(egui::Slider::new(&mut self.brush_radius, 1..=MAX_BRUSH_RADIUS));
                     if ui.button("Закрыть").clicked() {
                         self.show_brush_settings = false;
@@ -134,6 +201,11 @@ impl eframe::App for PixelArtEditor {
                     if self.active_layer >= self.layers.len() {
                         self.active_layer = self.layers.len() - 1;
                     }
+                }
+
+                // Кнопка сохранения
+                if ui.button("💾 Сохранить PNG").clicked() {
+                    self.show_save_dialog(ctx);
                 }
             });
         });
