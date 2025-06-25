@@ -17,6 +17,8 @@ struct PixelArtEditor {
     brush_radius: usize,
     show_brush_settings: bool,
     save_path: Option<PathBuf>,
+    show_save_dialog: bool,
+    pending_save_path: Option<PathBuf>, // Добавляем временное поле для хранения пути
 }
 
 #[derive(Default, PartialEq)]
@@ -43,6 +45,8 @@ impl PixelArtEditor {
             brush_radius: 1,
             show_brush_settings: false,
             save_path: None,
+            show_save_dialog: false,
+            pending_save_path: None,
         }
     }
 
@@ -126,9 +130,13 @@ impl PixelArtEditor {
     }
 
     fn show_save_dialog(&mut self, ctx: &egui::Context) {
+        let mut should_close = false;
+        let mut should_save = false;
+        
         egui::Window::new("Сохранить изображение")
             .collapsible(false)
             .resizable(false)
+            .open(&mut self.show_save_dialog)
             .show(ctx, |ui| {
                 ui.label("Выберите место для сохранения:");
                 
@@ -137,22 +145,38 @@ impl PixelArtEditor {
                         .set_file_name("pixel_art.png")
                         .save_file()
                     {
-                        self.save_path = Some(path);
+                        self.pending_save_path = Some(path);
                     }
                 }
                 
-                if let Some(path) = &self.save_path {
+                if let Some(path) = &self.pending_save_path {
                     ui.label(format!("Будет сохранено в: {}", path.display()));
                     
                     if ui.button("Сохранить").clicked() {
-                        if let Err(e) = self.save_to_png(path) {
-                            eprintln!("Ошибка сохранения: {}", e);
-                        } else {
-                            println!("Изображение сохранено как {}", path.display());
-                        }
+                        should_save = true;
+                        should_close = true;
                     }
                 }
+
+                if ui.button("Отмена").clicked() {
+                    should_close = true;
+                }
             });
+
+        if should_close {
+            self.show_save_dialog = false;
+        }
+
+        if should_save {
+            if let Some(path) = &self.pending_save_path {
+                if let Err(e) = self.save_to_png(path) {
+                    eprintln!("Ошибка сохранения: {}", e);
+                } else {
+                    println!("Изображение сохранено как {}", path.display());
+                    self.save_path = self.pending_save_path.take();
+                }
+            }
+        }
     }
 }
 
@@ -205,7 +229,7 @@ impl eframe::App for PixelArtEditor {
 
                 // Кнопка сохранения
                 if ui.button("💾 Сохранить PNG").clicked() {
-                    self.show_save_dialog(ctx);
+                    self.show_save_dialog = true;
                 }
             });
         });
@@ -265,6 +289,11 @@ impl eframe::App for PixelArtEditor {
                 });
             }
         });
+
+        // Показываем диалог сохранения если нужно
+        if self.show_save_dialog {
+            self.show_save_dialog(ctx);
+        }
     }
 }
 
