@@ -1,5 +1,5 @@
 use eframe::egui;
-use egui::{Color32, Vec2, Pos2, Rect, ColorImage, TextureHandle};
+use egui::{Color32, Vec2, Pos2, Rect, ColorImage, TextureHandle, Stroke};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::PathBuf;
@@ -32,6 +32,8 @@ struct PixelArtEditor {
     last_pan_pos: Pos2,
     show_file_menu: bool,
     color_wheel_texture: Option<TextureHandle>,
+    is_color_picking: bool,
+    color_edit_rgba: [f32; 4],
 }
 
 #[derive(Default, PartialEq)]
@@ -105,10 +107,31 @@ impl PixelArtEditor {
             last_pan_pos: Pos2::ZERO,
             show_file_menu: false,
             color_wheel_texture: None,
+            is_color_picking: false,
+            color_edit_rgba: [0.0, 0.0, 0.0, 1.0],
         };
         
         editor.create_color_wheel_texture(cc);
+        editor.update_color_edit_rgba();
         editor
+    }
+
+    fn update_color_edit_rgba(&mut self) {
+        self.color_edit_rgba = [
+            self.current_color.r() as f32 / 255.0,
+            self.current_color.g() as f32 / 255.0,
+            self.current_color.b() as f32 / 255.0,
+            self.current_color.a() as f32 / 255.0,
+        ];
+    }
+
+    fn update_current_color_from_rgba(&mut self) {
+        self.current_color = Color32::from_rgba_premultiplied(
+            (self.color_edit_rgba[0] * 255.0) as u8,
+            (self.color_edit_rgba[1] * 255.0) as u8,
+            (self.color_edit_rgba[2] * 255.0) as u8,
+            (self.color_edit_rgba[3] * 255.0) as u8,
+        );
     }
 
     fn create_color_wheel_texture(&mut self, cc: &eframe::CreationContext<'_>) {
@@ -165,6 +188,86 @@ impl PixelArtEditor {
             image,
             egui::TextureOptions::LINEAR
         ));
+    }
+
+    fn rgb_to_hsv(&self, r: u8, g: u8, b: u8) -> (f32, f32, f32) {
+        let r = r as f32 / 255.0;
+        let g = g as f32 / 255.0;
+        let b = b as f32 / 255.0;
+        
+        let max = r.max(g.max(b));
+        let min = r.min(g.min(b));
+        let delta = max - min;
+        
+        let h = if delta == 0.0 {
+            0.0
+        } else if max == r {
+            ((g - b) / delta) % 6.0
+        } else if max == g {
+            (b - r) / delta + 2.0
+        } else {
+            (r - g) / delta + 4.0
+        } * 60.0;
+        
+        let h = (if h < 0.0 { h + 360.0 } else { h }) / 360.0;
+        let s = if max == 0.0 { 0.0 } else { delta / max };
+        let v = max;
+        
+        (h, s, v)
+    }
+
+    fn get_color_wheel_marker_pos(&self, rect: Rect) -> Option<Pos2> {
+        let (h, s, _) = self.rgb_to_hsv(
+            self.current_color.r(),
+            self.current_color.g(),
+            self.current_color.b(),
+        );
+        
+        let radius = rect.width() / 2.0;
+        let angle = h * 2.0 * std::f32::consts::PI - std::f32::consts::PI;
+        let distance = s * radius;
+        
+        Some(Pos2::new(
+            rect.center().x + distance * angle.cos(),
+            rect.center().y + distance * angle.sin(),
+        ))
+    }
+
+    fn update_color_from_wheel(&mut self, pos: Pos2, rect: Rect) {
+        let dx = pos.x - rect.center().x;
+        let dy = pos.y - rect.center().y;
+        let distance = (dx * dx + dy * dy).sqrt();
+        let radius = rect.width() / 2.0;
+        
+        if distance <= radius {
+            let angle = dy.atan2(dx) + std::f32::consts::PI;
+            let normalized_angle = angle / (2.0 * std::f32::consts::PI);
+            let normalized_distance = distance / radius;
+            
+            let h = normalized_angle;
+            let s = normalized_distance;
+            let v = 1.0;
+            
+            let c = v * s;
+            let x_val = c * (1.0 - ((h * 6.0) % 2.0 - 1.0).abs());
+            let m = v - c;
+            
+            let (r, g, b) = match (h * 6.0) as i32 {
+                0 => (c, x_val, 0.0),
+                1 => (x_val, c, 0.0),
+                2 => (0.0, c, x_val),
+                3 => (0.0, x_val, c),
+                4 => (x_val, 0.0, c),
+                _ => (c, 0.0, x_val),
+            };
+            
+            self.current_color = Color32::from_rgb(
+                ((r + m) * 255.0) as u8,
+                ((g + m) * 255.0) as u8,
+                ((b + m) * 255.0) as u8,
+            );
+            self.update_color_edit_rgba();
+        }
     }
 
     fn init_with_size(&mut self, width: usize, height: usize) {
@@ -313,6 +416,7 @@ impl PixelArtEditor {
             Tool::Eyedropper => {
                 if pos.0 < self.canvas_width && pos.1 < self.canvas_height {
                     self.current_color = self.layers[self.active_layer].pixels[pos.0][pos.1];
+                    self.update_color_edit_rgba();
                 }
             }
         }
@@ -752,58 +856,48 @@ impl eframe::App for PixelArtEditor {
                 
                 ui.separator();
                 
-                // RGB круг (палитра)
+                // RGB круг (палитра) с плавным выбором
                 ui.label("RGB круг");
                 if let Some(texture) = &self.color_wheel_texture {
                     let size = 150.0;
                     let response = ui.add(
                         egui::Image::new(texture, Vec2::new(size, size))
-                            .sense(egui::Sense::click())
+                            .sense(egui::Sense::drag())
                     );
                     
-                    if response.clicked() {
-                        if let Some(pos) = response.interact_pointer_pos() {
-                            let rect = response.rect;
-                            let dx = (pos.x - rect.center().x) as f32;
-                            let dy = (pos.y - rect.center().y) as f32;
-                            let distance = (dx * dx + dy * dy).sqrt();
-                            let radius = size / 2.0;
-                            
-                            if distance <= radius {
-                                let angle = dy.atan2(dx) + std::f32::consts::PI;
-                                let normalized_angle = angle / (2.0 * std::f32::consts::PI);
-                                let normalized_distance = distance / radius;
-                                
-                                let h = normalized_angle;
-                                let s = normalized_distance;
-                                let v = 1.0;
-                                
-                                let c = v * s;
-                                let x_val = c * (1.0 - ((h * 6.0) % 2.0 - 1.0).abs());
-                                let m = v - c;
-                                
-                                let (r, g, b) = match (h * 6.0) as i32 {
-                                    0 => (c, x_val, 0.0),
-                                    1 => (x_val, c, 0.0),
-                                    2 => (0.0, c, x_val),
-                                    3 => (0.0, x_val, c),
-                                    4 => (x_val, 0.0, c),
-                                    _ => (c, 0.0, x_val),
-                                };
-                                
-                                self.current_color = Color32::from_rgb(
-                                    ((r + m) * 255.0) as u8,
-                                    ((g + m) * 255.0) as u8,
-                                    ((b + m) * 255.0) as u8,
-                                );
-                            }
+                    let rect = response.rect;
+                    
+                    // Обработка выбора цвета
+                    if response.drag_started() {
+                        self.is_color_picking = true;
+                    }
+                    
+                    if self.is_color_picking {
+                        if let Some(pos) = ctx.pointer_latest_pos() {
+                            self.update_color_from_wheel(pos, rect);
                         }
+                    }
+                    
+                    if response.drag_released() {
+                        self.is_color_picking = false;
+                    }
+                    
+                    // Рисуем маркер текущего цвета
+                    if let Some(marker_pos) = self.get_color_wheel_marker_pos(rect) {
+                        ui.painter().circle(
+                            marker_pos,
+                            5.0,
+                            Color32::WHITE,
+                            Stroke::new(2.0, Color32::BLACK),
+                        );
                     }
                 }
 
-                // Отображение текущего цвета
+                // Редактирование цвета
                 ui.separator();
-                ui.label("Текущий цвет");
+                ui.label("Редактирование цвета");
+                
+                // Отображение текущего цвета
                 ui.horizontal(|ui| {
                     // Квадрат с текущим цветом
                     ui.painter().rect_filled(
@@ -820,8 +914,23 @@ impl eframe::App for PixelArtEditor {
                         ui.label(format!("R: {}", self.current_color.r()));
                         ui.label(format!("G: {}", self.current_color.g()));
                         ui.label(format!("B: {}", self.current_color.b()));
+                        ui.label(format!("A: {}", self.current_color.a()));
                     });
                 });
+                
+                // Ползунки для редактирования цвета
+                if ui.add(egui::Slider::new(&mut self.color_edit_rgba[0], 0.0..=1.0).text("R")).changed() {
+                    self.update_current_color_from_rgba();
+                }
+                if ui.add(egui::Slider::new(&mut self.color_edit_rgba[1], 0.0..=1.0).text("G")).changed() {
+                    self.update_current_color_from_rgba();
+                }
+                if ui.add(egui::Slider::new(&mut self.color_edit_rgba[2], 0.0..=1.0).text("B")).changed() {
+                    self.update_current_color_from_rgba();
+                }
+                if ui.add(egui::Slider::new(&mut self.color_edit_rgba[3], 0.0..=1.0).text("A")).changed() {
+                    self.update_current_color_from_rgba();
+                }
                 
                 ui.separator();
                 
