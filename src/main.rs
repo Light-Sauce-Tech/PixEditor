@@ -1,5 +1,5 @@
 use eframe::egui;
-use egui::{Color32, Vec2, Pos2, Rect};
+use egui::{Color32, Vec2, Pos2, Rect, ColorImage, TextureHandle};
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::PathBuf;
@@ -30,6 +30,8 @@ struct PixelArtEditor {
     canvas_offset: Vec2,
     is_panning: bool,
     last_pan_pos: Pos2,
+    show_file_menu: bool,
+    color_wheel_texture: Option<TextureHandle>,
 }
 
 #[derive(Default, PartialEq)]
@@ -37,7 +39,9 @@ enum Tool {
     #[default]
     Pencil,
     Eraser,
+    Brush,
     Fill,
+    Eyedropper,
 }
 
 struct Layer {
@@ -79,8 +83,8 @@ impl Footage {
 }
 
 impl PixelArtEditor {
-    fn new() -> Self {
-        Self {
+    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        let mut editor = Self {
             current_color: Color32::BLACK,
             current_tool: Tool::Pencil,
             layers: vec![Layer::new(32, 32)],
@@ -99,7 +103,68 @@ impl PixelArtEditor {
             canvas_offset: Vec2::ZERO,
             is_panning: false,
             last_pan_pos: Pos2::ZERO,
+            show_file_menu: false,
+            color_wheel_texture: None,
+        };
+        
+        editor.create_color_wheel_texture(cc);
+        editor
+    }
+
+    fn create_color_wheel_texture(&mut self, cc: &eframe::CreationContext<'_>) {
+        let size = 256;
+        let mut pixels = vec![Color32::TRANSPARENT; size * size];
+        
+        let center = (size as f32 / 2.0, size as f32 / 2.0);
+        let radius = size as f32 / 2.0;
+        
+        for y in 0..size {
+            for x in 0..size {
+                let dx = x as f32 - center.0;
+                let dy = y as f32 - center.1;
+                let distance = (dx * dx + dy * dy).sqrt();
+                
+                if distance <= radius {
+                    let angle = dy.atan2(dx) + std::f32::consts::PI;
+                    let normalized_angle = angle / (2.0 * std::f32::consts::PI);
+                    let normalized_distance = distance / radius;
+                    
+                    let h = normalized_angle;
+                    let s = normalized_distance;
+                    let v = 1.0;
+                    
+                    let c = v * s;
+                    let x_val = c * (1.0 - ((h * 6.0) % 2.0 - 1.0).abs());
+                    let m = v - c;
+                    
+                    let (r, g, b) = match (h * 6.0) as i32 {
+                        0 => (c, x_val, 0.0),
+                        1 => (x_val, c, 0.0),
+                        2 => (0.0, c, x_val),
+                        3 => (0.0, x_val, c),
+                        4 => (x_val, 0.0, c),
+                        _ => (c, 0.0, x_val),
+                    };
+                    
+                    pixels[y * size + x] = Color32::from_rgb(
+                        ((r + m) * 255.0) as u8,
+                        ((g + m) * 255.0) as u8,
+                        ((b + m) * 255.0) as u8,
+                    );
+                }
+            }
         }
+        
+        let image = ColorImage {
+            size: [size, size],
+            pixels,
+        };
+        
+        self.color_wheel_texture = Some(cc.egui_ctx.load_texture(
+            "color_wheel",
+            image,
+            egui::TextureOptions::LINEAR
+        ));
     }
 
     fn init_with_size(&mut self, width: usize, height: usize) {
@@ -243,7 +308,13 @@ impl PixelArtEditor {
         match self.current_tool {
             Tool::Pencil => self.draw_square(pos.0, pos.1, self.current_color),
             Tool::Eraser => self.draw_square(pos.0, pos.1, Color32::TRANSPARENT),
+            Tool::Brush => self.draw_square(pos.0, pos.1, self.current_color),
             Tool::Fill => self.flood_fill(pos.0, pos.1, self.current_color),
+            Tool::Eyedropper => {
+                if pos.0 < self.canvas_width && pos.1 < self.canvas_height {
+                    self.current_color = self.layers[self.active_layer].pixels[pos.0][pos.1];
+                }
+            }
         }
     }
 
@@ -555,55 +626,59 @@ impl eframe::App for PixelArtEditor {
                 });
         }
 
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+        // Главное меню
+        egui::TopBottomPanel::top("main_menu").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                let pencil_btn = ui.selectable_value(&mut self.current_tool, Tool::Pencil, "✏️ Карандаш");
-                if pencil_btn.secondary_clicked() {
-                    self.show_brush_settings = true;
+                if ui.selectable_label(self.show_file_menu, "Файл").clicked() {
+                    self.show_file_menu = !self.show_file_menu;
                 }
-                ui.selectable_value(&mut self.current_tool, Tool::Eraser, "🧽 Ластик");
-                ui.selectable_value(&mut self.current_tool, Tool::Fill, "🎨 Заливка");
-                
-                ui.separator();
-                
-                ui.label("Цвет:");
-                ui.color_edit_button_srgba(&mut self.current_color);
-                
-                ui.separator();
-                
-                if ui.button("➕ Слой").clicked() {
-                    self.layers.push(Layer::new(self.canvas_width, self.canvas_height));
-                    self.active_layer = self.layers.len() - 1;
-                }
-                if ui.button("🗑️ Удалить").clicked() && self.layers.len() > 1 {
-                    self.layers.remove(self.active_layer);
-                    if self.active_layer >= self.layers.len() {
-                        self.active_layer = self.layers.len() - 1;
-                    }
-                }
-
-                ui.separator();
-
-                if ui.button("-").clicked() {
-                    self.zoom = (self.zoom - ZOOM_STEP).max(MIN_ZOOM);
-                }
-                ui.label(format!("{:.0}%", self.zoom * 100.0));
-                if ui.button("+").clicked() {
-                    self.zoom = (self.zoom + ZOOM_STEP).min(MAX_ZOOM);
-                }
-                if ui.button("Сброс").clicked() {
-                    self.zoom = 1.0;
-                    self.center_canvas(ui.available_size());
-                }
-
-                ui.separator();
-
-                if ui.button("💾 Сохранить PNG").clicked() {
-                    self.show_save_dialog = true;
-                }
+                ui.selectable_value(&mut (), (), "Главная");
+                ui.selectable_value(&mut (), (), "Палитра");
+                ui.selectable_value(&mut (), (), "Анимация");
+                ui.selectable_value(&mut (), (), "Холст");
             });
         });
 
+        // Меню файла
+        if self.show_file_menu {
+            egui::Window::new("Файл")
+                .collapsible(false)
+                .resizable(false)
+                .fixed_pos(egui::pos2(10.0, 25.0))
+                .show(ctx, |ui| {
+                    if ui.button("Новый").clicked() {
+                        self.show_canvas_selector = true;
+                        self.show_file_menu = false;
+                    }
+                    if ui.button("Открыть").clicked() {
+                        // TODO: Реализовать открытие файла
+                        self.show_file_menu = false;
+                    }
+                    if ui.button("Сохранить").clicked() {
+                        self.show_save_dialog = true;
+                        self.show_file_menu = false;
+                    }
+                    if ui.button("Экспорт").clicked() {
+                        // TODO: Реализовать экспорт
+                        self.show_file_menu = false;
+                    }
+                });
+        }
+
+        // Панель инструментов (горизонтальная)
+        egui::TopBottomPanel::top("tools_panel").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                if ui.selectable_value(&mut self.current_tool, Tool::Pencil, "Карандаш").clicked() {
+                    self.show_brush_settings = true;
+                }
+                ui.selectable_value(&mut self.current_tool, Tool::Eraser, "Ластик");
+                ui.selectable_value(&mut self.current_tool, Tool::Brush, "Кисть");
+                ui.selectable_value(&mut self.current_tool, Tool::Fill, "Заливка");
+                ui.selectable_value(&mut self.current_tool, Tool::Eyedropper, "Пипетка");
+            });
+        });
+
+        // Рабочее пространство (холст)
         egui::CentralPanel::default().show(ctx, |ui| {
             let available_size = ui.available_size();
             self.center_canvas(available_size);
@@ -656,18 +731,124 @@ impl eframe::App for PixelArtEditor {
             }
         });
 
-        egui::SidePanel::right("layers_panel").show(ctx, |ui| {
-            ui.label("📚 Слои");
-            ui.separator();
-            
-            for (i, layer) in self.layers.iter_mut().enumerate() {
+        // Правая панель с настройками
+        egui::SidePanel::right("right_panel").show(ctx, |ui| {
+            ui.vertical(|ui| {
+                // Масштаб
+                ui.label("Масштаб");
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut layer.visible, "");
-                    if ui.selectable_label(i == self.active_layer, &format!("Слой {}", i + 1)).clicked() {
-                        self.active_layer = i;
+                    if ui.button("-").clicked() {
+                        self.zoom = (self.zoom - ZOOM_STEP).max(MIN_ZOOM);
+                    }
+                    ui.label(format!("{:.0}%", self.zoom * 100.0));
+                    if ui.button("+").clicked() {
+                        self.zoom = (self.zoom + ZOOM_STEP).min(MAX_ZOOM);
                     }
                 });
-            }
+                if ui.button("Сброс").clicked() {
+                    self.zoom = 1.0;
+                    self.center_canvas(ui.available_size());
+                }
+                
+                ui.separator();
+                
+                // RGB круг (палитра)
+                ui.label("RGB круг");
+                if let Some(texture) = &self.color_wheel_texture {
+                    let size = 150.0;
+                    let response = ui.add(
+                        egui::Image::new(texture, Vec2::new(size, size))
+                            .sense(egui::Sense::click())
+                    );
+                    
+                    if response.clicked() {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            let rect = response.rect;
+                            let dx = (pos.x - rect.center().x) as f32;
+                            let dy = (pos.y - rect.center().y) as f32;
+                            let distance = (dx * dx + dy * dy).sqrt();
+                            let radius = size / 2.0;
+                            
+                            if distance <= radius {
+                                let angle = dy.atan2(dx) + std::f32::consts::PI;
+                                let normalized_angle = angle / (2.0 * std::f32::consts::PI);
+                                let normalized_distance = distance / radius;
+                                
+                                let h = normalized_angle;
+                                let s = normalized_distance;
+                                let v = 1.0;
+                                
+                                let c = v * s;
+                                let x_val = c * (1.0 - ((h * 6.0) % 2.0 - 1.0).abs());
+                                let m = v - c;
+                                
+                                let (r, g, b) = match (h * 6.0) as i32 {
+                                    0 => (c, x_val, 0.0),
+                                    1 => (x_val, c, 0.0),
+                                    2 => (0.0, c, x_val),
+                                    3 => (0.0, x_val, c),
+                                    4 => (x_val, 0.0, c),
+                                    _ => (c, 0.0, x_val),
+                                };
+                                
+                                self.current_color = Color32::from_rgb(
+                                    ((r + m) * 255.0) as u8,
+                                    ((g + m) * 255.0) as u8,
+                                    ((b + m) * 255.0) as u8,
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Отображение текущего цвета
+                ui.separator();
+                ui.label("Текущий цвет");
+                ui.horizontal(|ui| {
+                    // Квадрат с текущим цветом
+                    ui.painter().rect_filled(
+                        Rect::from_min_size(
+                            ui.cursor().min,
+                            Vec2::new(30.0, 30.0)
+                        ),
+                        0.0,
+                        self.current_color
+                    );
+                    
+                    // RGB значения
+                    ui.vertical(|ui| {
+                        ui.label(format!("R: {}", self.current_color.r()));
+                        ui.label(format!("G: {}", self.current_color.g()));
+                        ui.label(format!("B: {}", self.current_color.b()));
+                    });
+                });
+                
+                ui.separator();
+                
+                // Слои
+                ui.label("Слои");
+                for (i, layer) in self.layers.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.checkbox(&mut layer.visible, "");
+                        if ui.selectable_label(i == self.active_layer, &format!("Слой {}", i + 1)).clicked() {
+                            self.active_layer = i;
+                        }
+                    });
+                }
+                
+                ui.horizontal(|ui| {
+                    if ui.button("+").clicked() {
+                        self.layers.push(Layer::new(self.canvas_width, self.canvas_height));
+                        self.active_layer = self.layers.len() - 1;
+                    }
+                    if ui.button("-").clicked() && self.layers.len() > 1 {
+                        self.layers.remove(self.active_layer);
+                        if self.active_layer >= self.layers.len() {
+                            self.active_layer = self.layers.len() - 1;
+                        }
+                    }
+                });
+            });
         });
 
         if self.show_save_dialog {
@@ -681,6 +862,6 @@ fn main() {
     let _ = eframe::run_native(
         "Pixel Art Editor",
         options,
-        Box::new(|_cc| Box::new(PixelArtEditor::new())),
+        Box::new(|cc| Box::new(PixelArtEditor::new(cc))),
     );
 }
