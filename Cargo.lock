@@ -2159,6 +2159,7 @@ dependencies = [
  "image",
  "png",
  "rfd",
+ "serde",
  "winapi",
 ]
 
